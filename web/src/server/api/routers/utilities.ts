@@ -1,6 +1,12 @@
-import { createTRPCRouter, protectedProcedure } from "@/src/server/api/trpc";
-import { z } from "zod/v4";
+import {
+  createTRPCRouter,
+  protectedProcedure,
+  publicProcedure,
+} from "@/src/server/api/trpc";
+import { z } from "zod"; // Using default Zod import
 import { promises as dns } from "dns";
+import axios from "axios";
+import { TRPCError } from "@trpc/server";
 import { Address4, Address6 } from "ip-address";
 import { logger } from "@langfuse/shared/src/server";
 
@@ -206,5 +212,98 @@ export const utilsRouter = createTRPCRouter({
 
       const isValidImg = await isValidImageUrl(url);
       return { isValid: isValidImg };
+    }),
+
+  fetchGitHubContent: publicProcedure
+    .input(z.object({ url: z.string().url("Invalid URL format.") }))
+    .query(async ({ input }) => {
+      try {
+        // Validate if the URL is a raw GitHub content URL
+        const GITHUB_RAW_CONTENT_HOSTNAME = "raw.githubusercontent.com";
+        const GITHUB_HOSTNAME = "github.com";
+        const url = new URL(input.url);
+
+        if (
+          url.hostname !== GITHUB_RAW_CONTENT_HOSTNAME &&
+          !(
+            url.hostname === GITHUB_HOSTNAME && url.pathname.includes("/blob/")
+          )
+        ) {
+          // Allow github.com/user/repo/blob/branch/file.txt URLs, will be transformed to raw
+        } else if (url.hostname !== GITHUB_RAW_CONTENT_HOSTNAME) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message:
+              "Invalid GitHub URL. Only raw.githubusercontent.com or github.com/.../blob/... URLs are allowed.",
+          });
+        }
+
+        let fetchUrl = input.url;
+        // If it's a github.com/user/repo/blob/branch/file.txt URL, transform it to raw.githubusercontent.com
+        if (url.hostname === GITHUB_HOSTNAME && url.pathname.includes("/blob/")) {
+          fetchUrl = input.url.replace(`${url.origin}/`, `${url.protocol}//${GITHUB_RAW_CONTENT_HOSTNAME}/`)
+                                .replace("/blob/", "/");
+        }
+
+        const response = await axios.get(fetchUrl, {
+          headers: {
+            Accept: "text/plain", // Ensure we get plain text
+          },
+          // Small timeout for fetching content
+          timeout: 5000, // 5 seconds
+        });
+
+        if (response.status === 200) {
+          if (typeof response.data === "string") {
+            // Limit the size of the fetched content to avoid abuse
+            const MAX_CONTENT_SIZE = 1_000_000; // 1MB
+            if (response.data.length > MAX_CONTENT_SIZE) {
+              throw new TRPCError({
+                code: "PAYLOAD_TOO_LARGE",
+                message: `Content exceeds maximum allowed size of ${MAX_CONTENT_SIZE} bytes.`,
+              });
+            }
+            return response.data;
+          } else {
+            throw new TRPCError({
+              code: "PRECONDITION_FAILED",
+              message: "Content fetched is not plain text.",
+            });
+          }
+        } else {
+          // This case might not be reached if axios throws for non-2xx status codes by default
+          throw new TRPCError({
+            code: "NOT_FOUND", // Or map other statuses appropriately
+            message: `Failed to fetch content. Status: ${response.status}`,
+          });
+        }
+      } catch (error: any) {
+        logger.error("Error fetching GitHub content:", error);
+        if (axios.isAxiosError(error)) {
+          if (error.response) {
+            let errorCode: TRPCError["code"] = "INTERNAL_SERVER_ERROR";
+            if (error.response.status === 404) errorCode = "NOT_FOUND";
+            if (error.response.status === 403) errorCode = "FORBIDDEN";
+            if (error.response.status === 400) errorCode = "BAD_REQUEST";
+
+            throw new TRPCError({
+              code: errorCode,
+              message: `GitHub request failed: ${error.response.status} ${error.response.statusText || ""}`.trim(),
+            });
+          } else if (error.request) {
+            // Network error (e.g., DNS resolution, TCP connection refused)
+             throw new TRPCError({
+              code: "INTERNAL_SERVER_ERROR",
+              message: "Network error while trying to reach GitHub.",
+            });
+          }
+        }
+        // Fallback error
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "An unexpected error occurred while fetching content from GitHub.",
+          cause: error instanceof Error ? error : undefined,
+        });
+      }
     }),
 });

@@ -47,6 +47,7 @@ import { PromptVariableListPreview } from "@/src/features/prompts/components/Pro
 import { CodeMirrorEditor } from "@/src/components/editor/CodeMirrorEditor";
 import { PromptLinkingEditor } from "@/src/components/editor/PromptLinkingEditor";
 import { PRODUCTION_LABEL } from "@/src/features/prompts/constants";
+import { Label } from "@/src/components/ui/label";
 import { usePostHogClientCapture } from "@/src/features/posthog-analytics/usePostHogClientCapture";
 import usePlaygroundCache from "@/src/features/playground/page/hooks/usePlaygroundCache";
 import { useQueryParam } from "use-query-params";
@@ -64,8 +65,13 @@ export const NewPromptForm: React.FC<NewPromptFormProps> = (props) => {
   const [formError, setFormError] = useState<string | null>(null);
   const { playgroundCache } = usePlaygroundCache();
   const [initialMessages, setInitialMessages] = useState<unknown>([]);
+  const [showGitHubImport, setShowGitHubImport] = useState(false);
+  const [githubUrl, setGithubUrl] = useState("");
+  const [isFetchingGitHubContent, setIsFetchingGitHubContent] = useState(false);
+  const [gitHubFetchError, setGitHubFetchError] = useState<string | null>(null);
 
   const utils = api.useUtils();
+  const trpcClient = api.client;
   const capture = usePostHogClientCapture();
 
   let initialPromptVariant: PromptVariant | null;
@@ -112,6 +118,38 @@ export const NewPromptForm: React.FC<NewPromptFormProps> = (props) => {
     onSuccess: () => utils.prompts.invalidate(),
     onError: (error) => setFormError(error.message),
   });
+
+  const handleFetchGitHubContent = async () => {
+    if (!githubUrl) {
+      setGitHubFetchError("Please enter a GitHub URL.");
+      return;
+    }
+    setIsFetchingGitHubContent(true);
+    setGitHubFetchError(null);
+    try {
+      const fetchedContent = await trpcClient.utils.fetchGitHubContent.query({
+        url: githubUrl,
+      });
+      form.setValue("textPrompt", fetchedContent, {
+        shouldValidate: true,
+        shouldDirty: true,
+      });
+      // Optionally clear URL and hide import section after successful fetch
+      // setGithubUrl("");
+      // setShowGitHubImport(false);
+    } catch (error: any) {
+      if (error instanceof Error && "message" in error) {
+        setGitHubFetchError(error.message);
+      } else if (typeof error === "string") {
+        setGitHubFetchError(error);
+      } else {
+        setGitHubFetchError("An unknown error occurred while fetching content.");
+      }
+      console.error("GitHub fetch error:", error);
+    } finally {
+      setIsFetchingGitHubContent(false);
+    }
+  };
 
   const allPrompts = api.prompts.filterOptions.useQuery(
     {
@@ -283,6 +321,53 @@ export const NewPromptForm: React.FC<NewPromptFormProps> = (props) => {
                 </TabsList>
               ) : null}
               <TabsContent value={PromptType.Text}>
+                <div className="mb-4 flex items-center space-x-2">
+                  <Checkbox
+                    id="github-import-toggle"
+                    checked={showGitHubImport}
+                    onCheckedChange={() => setShowGitHubImport(!showGitHubImport)}
+                  />
+                  <Label htmlFor="github-import-toggle">
+                    Import from GitHub URL?
+                  </Label>
+                </div>
+                {showGitHubImport && (
+                  <div className="mb-4 space-y-2">
+                    <Label htmlFor="github-url">GitHub Raw URL</Label>
+                    <div className="flex space-x-2">
+                      <Input
+                        id="github-url"
+                        type="url"
+                        placeholder="https://raw.githubusercontent.com/..."
+                        value={githubUrl}
+                        onChange={(e) => {
+                          setGithubUrl(e.target.value);
+                          if (gitHubFetchError) setGitHubFetchError(null); // Clear error when user types
+                        }}
+                        className="flex-1"
+                        disabled={isFetchingGitHubContent}
+                      />
+                      <Button
+                        type="button"
+                        onClick={handleFetchGitHubContent}
+                        disabled={isFetchingGitHubContent || !githubUrl.trim()}
+                        loading={isFetchingGitHubContent}
+                      >
+                        Fetch Content
+                      </Button>
+                    </div>
+                    {isFetchingGitHubContent && (
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        Fetching content...
+                      </p>
+                    )}
+                    {gitHubFetchError && (
+                      <p className="mt-1 text-sm text-destructive">
+                        {gitHubFetchError}
+                      </p>
+                    )}
+                  </div>
+                )}
                 <FormField
                   control={form.control}
                   name="textPrompt"
